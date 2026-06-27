@@ -1,27 +1,27 @@
-export const TRANSFER_REQUESTED_EVENT  = 'transfer.requested';
-export const TRANSFER_COMPLETED_EVENT  = 'transfer.completed';
-export const TRANSFER_FAILED_EVENT     = 'transfer.failed';
+// ── Eventos que accounts publica en NATS ──────────────────────────────────
 
-export interface TransferRequestedEvent {
+export const TRANSFER_REQUESTED = 'transfer.requested';
+export const TRANSFER_COMPLETED = 'transfer.completed';
+export const TRANSFER_FAILED    = 'transfer.failed';
+
+// ── Payload que accounts envía al publicar transfer.requested ─────────────
+
+export interface TransferRequestedPayload {
   transferId: string;
-  originAccountId: string;
-  destinationAccountId: string;
+  fromAccountId: string;
+  toAccountId: string;
   amount: number;
-  requestedAt: string;
+  requestedAt: string; // ISO 8601
 }
 
-export interface TransferCompletedEvent {
-  transferId: string;
-  originAccountId: string;
-  destinationAccountId: string;
-  amount: number;
-  completedAt: string;
-}
+// ── Payload que transactions responde (lo usa alerts, no accounts) ─────────
 
-export interface TransferFailedEvent {
+export interface TransferResultPayload {
   transferId: string;
-  originAccountId: string;
+  fromAccountId: string;
+  toAccountId: string;
   amount: number;
-  reason: string;
-  failedAt: string;
+  status: 'completed' | 'failed';
+  reason?: string;
+  processedAt: string;
 }
