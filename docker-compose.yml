@@ -1,0 +1,46 @@
+# ============================================================
+#  Banca Simplificada — desarrollo local
+# ------------------------------------------------------------
+#  Levanta la infraestructura de soporte:
+#    - NATS     → broker de mensajería entre microservicios
+#    - Postgres → base de datos de accounts
+#
+#  Los microservicios (accounts, transactions, alerts) corren
+#  en tu host con `npm run start:dev accounts`, etc.
+# ============================================================
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats-broker
+    restart: unless-stopped
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: banca-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: bancadb
+      POSTGRES_USER: bancaadmin
+      POSTGRES_PASSWORD: local1234
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bancaadmin -d bancadb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
