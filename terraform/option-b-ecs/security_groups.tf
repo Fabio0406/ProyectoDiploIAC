@@ -1,15 +1,32 @@
-# ── ALB ──────────────────────────────────────────────────────────────────────
-resource "aws_security_group" "alb" {
-  name        = "${var.project_name}-alb-sg"
-  description = "Permite HTTP entrante desde internet hacia el ALB"
+# ── API Gateway (VPC Link ENIs) ───────────────────────────────────────────────
+resource "aws_security_group" "api_gateway" {
+  name        = "${var.project_name}-apigw-sg"
+  description = "SG para las ENIs del VPC Link del API Gateway"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    description = "HTTP desde internet"
+  egress {
+    description = "Salida hacia el ALB interno"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  tags = { Name = "${var.project_name}-apigw-sg" }
+}
+
+# ── ALB (ahora interno: solo acepta desde el VPC Link) ───────────────────────
+resource "aws_security_group" "alb" {
+  name        = "${var.project_name}-alb-sg"
+  description = "ALB interno: acepta HTTP solo desde el VPC Link del API Gateway"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "HTTP desde VPC Link del API Gateway"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.api_gateway.id]
   }
 
   egress {
@@ -122,10 +139,10 @@ resource "aws_vpc_security_group_ingress_rule" "nats_from_alerts" {
   description                  = "NATS desde alerts"
 }
 
-# ── RDS PostgreSQL (solo desde accounts) ──────────────────────────────────────
+# ── RDS PostgreSQL (desde accounts y transactions) ────────────────────────────
 resource "aws_security_group" "rds" {
   name        = "${var.project_name}-rds-sg"
-  description = "RDS PostgreSQL: ingreso solo desde accounts"
+  description = "RDS PostgreSQL: ingreso desde accounts y transactions"
   vpc_id      = aws_vpc.main.id
 
   tags = { Name = "${var.project_name}-rds-sg" }
@@ -138,4 +155,13 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_accounts" {
   from_port                    = 5432
   to_port                      = 5432
   description                  = "PostgreSQL desde accounts"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "rds_from_transactions" {
+  security_group_id            = aws_security_group.rds.id
+  referenced_security_group_id = aws_security_group.transactions.id
+  ip_protocol                  = "tcp"
+  from_port                    = 5432
+  to_port                      = 5432
+  description                  = "PostgreSQL desde transactions (valida y registra movimientos)"
 }

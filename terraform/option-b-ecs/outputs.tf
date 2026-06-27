@@ -1,5 +1,11 @@
+output "api_gateway_url" {
+  description = "URL publica del API Gateway — usar esta en el frontend"
+  value       = aws_apigatewayv2_stage.default.invoke_url
+}
+
+# El DNS del ALB ya no se expone: es interno y solo accesible desde la VPC
 output "alb_dns_name" {
-  description = "URL pública del ALB — usar esta en el frontend"
+  description = "DNS interno del ALB (referencia, no usar desde el frontend)"
   value       = aws_lb.main.dns_name
 }
 
