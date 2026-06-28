@@ -11,7 +11,7 @@ export class TransactionsController {
 
   @EventPattern(TRANSFER_REQUESTED_EVENT)
   onTransferRequested(@Payload() event: TransferRequestedEvent): void {
-    this.logger.log(`Evento recibido: ${TRANSFER_REQUESTED_EVENT} → ${event.transferId}`);
+    this.logger.log(`Evento recibido: transfer.requested → ${event.transferId}`);
     this.transactionsService.handleTransferRequested(event);
   }
 }

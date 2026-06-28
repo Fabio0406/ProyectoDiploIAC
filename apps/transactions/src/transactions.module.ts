@@ -4,22 +4,12 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import { NATS_SERVICE, DEFAULT_NATS_URL } from '@app/contracts';
 import { TransactionsController } from './transactions.controller';
 import { TransactionsService } from './transactions.service';
+import { TransferRecord } from './transfer-record.entity';
 import { Account } from '../../accounts/src/account.entity';
 
 @Module({
   imports: [
-    // Misma DB que accounts — transactions lee y actualiza saldos
-    TypeOrmModule.forRootAsync({
-      useFactory: () => ({
-        type: 'postgres',
-        url: process.env.DATABASE_URL,
-        entities: [Account],
-        synchronize: false,  // accounts ya crea la tabla, transactions solo la usa
-        ssl: { rejectUnauthorized: false },
-      }),
-    }),
-    TypeOrmModule.forFeature([Account]),
-    // Cliente NATS para emitir transfer.completed / transfer.failed
+    TypeOrmModule.forFeature([Account, TransferRecord]),
     ClientsModule.register([
       {
         name: NATS_SERVICE,
