@@ -1,13 +1,22 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build accounts
 
-FROM node:20-alpine
+COPY package*.json ./
+COPY tsconfig*.json nest-cli.json ./
+RUN npm ci
+
+COPY apps ./apps
+COPY libs ./libs
+
+RUN npx nest build accounts
+
+FROM node:20-alpine AS runtime
 WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-EXPOSE 3000
-CMD ["node", "dist/apps/accounts/main"]
+
+CMD ["node", "dist/apps/accounts/main.js"]

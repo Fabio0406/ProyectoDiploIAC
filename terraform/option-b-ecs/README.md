@@ -1,156 +1,206 @@
-# Opción B — ECS Fargate + ALB + ECR + Cloud Map + ElastiCache
+# Banca Simplificada (Grupo 8) — Infraestructura como Código
 
-Despliegue de los 2 microservicios, broker NATS y caché Redis en **AWS Fargate + ElastiCache** usando Terraform.
+Despliegue en **AWS ECS Fargate** de los 3 microservicios del caso de uso "Banca Simplificada" (`accounts`, `transactions`, `alerts`), el broker **NATS** y una base de datos **RDS PostgreSQL**, todo definido con Terraform.
+
+Proyecto adaptado de la plantilla de referencia `test_nest` (que usaba `orders`/`notifications` + Redis) al dominio bancario, reemplazando ElastiCache por RDS PostgreSQL y agregando una capa de **API Gateway** delante del ALB interno.
 
 ## Arquitectura desplegada
 
 ```
-                            Internet
-                                │
+                              Internet
+                                  │
+                                  ▼
+                  ┌───────────────────────────┐
+                  │   API Gateway (HTTP API)  │  ← público
+                  │   $default stage          │
+                  └─────────────┬─────────────┘
+                                │  VPC Link
                                 ▼
-                  ┌──────────────────────────┐
-                  │  Application Load        │  ← público (puerto 80)
-                  │  Balancer (ALB)          │
-                  └────────────┬─────────────┘
-                               │ :3000
-                               ▼
-   ┌─────────────────────────────────────────────────────────┐
-   │                  VPC 10.0.0.0/16                        │
-   │                                                         │
-   │  Subnet pública AZ-a            Subnet pública AZ-b     │
-   │  ┌──────────────┐               ┌──────────────┐        │
-   │  │ orders task  │               │ orders task  │        │
-   │  │ (Fargate)    │               │ (Fargate)    │        │
-   │  └──┬───────┬───┘               └──┬───────┬───┘        │
-   │     │       │                      │       │            │
-   │     │       └─────────┬────────────┘       │            │
-   │     │                 ▼                    │            │
-   │     │       ┌───────────────────┐          │            │
-   │     │       │ ElastiCache Redis │ ◄────────┘            │
-   │     │       │ (cache.t3.micro)  │   persistencia órdenes│
-   │     │       └───────────────────┘                       │
-   │     │                                                   │
-   │     └────────────┐                                      │
-   │                  ▼                                      │
-   │       ┌───────────────┐                                 │
-   │       │   NATS task   │   ← descubierta vía             │
-   │       │   (Fargate)   │     nats.app.internal           │
-   │       └───────▲───────┘                                 │
-   │               │                                         │
-   │       ┌───────┴────────┐                                │
-   │       │ notifications  │                                │
-   │       │   (Fargate)    │                                │
-   │       └────────────────┘                                │
-   └─────────────────────────────────────────────────────────┘
-                            │
-                            └──► CloudWatch Logs
-                            └──► ECR (orders, notifications)
-                            └──► Cloud Map (DNS interno)
+   ┌──────────────────────────────────────────────────────────────┐
+   │                     VPC 10.0.0.0/16                          │
+   │                                                                │
+   │   Subnet pública AZ-a              Subnet pública AZ-b        │
+   │                                                                │
+   │            ┌──────────────────────────┐                       │
+   │            │  ALB interno (puerto 80) │  ← solo desde VPC Link │
+   │            └────────────┬─────────────┘                       │
+   │                         │ :3000                                │
+   │                         ▼                                      │
+   │              ┌──────────────────┐                              │
+   │              │  accounts task   │  HTTP + publica a NATS       │
+   │              │   (Fargate)      │                              │
+   │              └───┬──────────┬───┘                              │
+   │                  │          │                                  │
+   │        ┌─────────┘          └─────────┐                        │
+   │        ▼                              ▼                        │
+   │  ┌─────────────┐              ┌───────────────┐                │
+   │  │ RDS Postgres│              │  NATS (Fargate)│               │
+   │  │ (bancadb)   │◄─────────────┤ nats.app.internal              │
+   │  └──────▲──────┘              └───────┬────────┘                │
+   │         │                             │                        │
+   │         │                    ┌────────┴────────┐               │
+   │         │                    ▼                 ▼               │
+   │         │           ┌────────────────┐ ┌───────────────┐       │
+   │         └───────────┤ transactions   │ │    alerts     │       │
+   │                      │   (worker)    │ │   (worker)    │       │
+   │                      └────────────────┘ └───────────────┘       │
+   └──────────────────────────────────────────────────────────────┘
+                                  │
+                                  └──► CloudWatch Logs
+                                  └──► ECR (accounts, transactions, alerts)
+                                  └──► Cloud Map (DNS interno app.internal)
 ```
+
+**Flujo de eventos NATS:** `transfer.requested` → `transactions` → `transfer.completed` / `transfer.failed` → `alerts`
+
+**Patrón de comunicación:**
+- Síncrono (HTTP): Internet → API Gateway → VPC Link → ALB interno → `accounts`
+- Asíncrono (eventos): `accounts` → NATS → `transactions` → NATS → `alerts`
+- Descubrimiento interno: todo por DNS de Cloud Map (`*.app.internal`), nunca por IP hardcodeada
 
 ## Recursos creados (por archivo)
 
 | Archivo | Recursos AWS |
 |---|---|
-| `providers.tf`        | Provider AWS (~> 5.60), tags por defecto (`Project`, `ManagedBy`, `Course`) |
-| `variables.tf`        | 13 variables (región, CIDRs, AZs, `task_cpu`, `task_memory`, `redis_node_type`, `image_tag`, etc.) |
-| `network.tf`          | VPC `10.0.0.0/16`, 2 subnets públicas (`10.0.1.0/24`, `10.0.2.0/24`), IGW, route table |
-| `security_groups.tf`  | 5 SGs encadenados (ALB → orders → nats/redis ← notifications) |
-| `ecr.tf`              | 2 repositorios ECR (`test-nest/orders`, `test-nest/notifications`) + lifecycle policy (máx 10 imágenes) |
-| `iam.tf`              | Rol de ejecución de tareas (`AmazonECSTaskExecutionRolePolicy`) |
-| `service_discovery.tf`| Namespace privado `app.internal` + 3 servicios Cloud Map (nats / orders / notifications) |
-| `alb.tf`              | ALB, target group `ip:3000`, listener HTTP:80, health check `/orders/status/healthcheck` (matcher `200-404`) |
-| `elasticache.tf`      | Subnet group + nodo ElastiCache Redis 7.1 (`cache.t3.micro`) |
-| `logs.tf`             | 3 log groups CloudWatch (`/ecs/test-nest/{nats,orders,notifications}`, retención 7 días) |
-| `ecs.tf`              | Cluster `test-nest-cluster`, 3 task definitions (Fargate 0.25 vCPU / 0.5 GB), 3 services |
-| `outputs.tf`          | DNS del ALB, URLs de ECR, comando de login a ECR, nombre del cluster, namespace de Cloud Map, endpoint Redis |
+| `providers.tf` | Provider AWS (`~> 5.60`), tags por defecto (`Project`, `ManagedBy`, `Course`) |
+| `variables.tf` | Variables de región, credenciales, red, ECS/Fargate (`task_cpu`, `task_memory`, `*_desired_count`) y RDS (`db_instance_class`, `db_username`, `db_password`) |
+| `network.tf` | VPC `10.0.0.0/16`, 2 subnets públicas (una por AZ), Internet Gateway, route table |
+| `security_groups.tf` | 7 SGs encadenados: `api_gateway` → `alb` → `accounts` → `nats`/`rds` ← `transactions`/`alerts` |
+| `ecr.tf` | 3 repositorios ECR (`banca-g8/accounts`, `/transactions`, `/alerts`) + lifecycle policy (máx. 10 imágenes) |
+| `iam.tf` | Rol de ejecución de tareas (`AmazonECSTaskExecutionRolePolicy`) |
+| `service_discovery.tf` | Namespace privado `app.internal` + 4 servicios Cloud Map (nats / accounts / transactions / alerts) |
+| `alb.tf` | ALB **interno**, target group `ip:3000` para `accounts`, listener HTTP:80 con health check `/accounts/health` |
+| `api_gateway.tf` | API Gateway HTTP API público, VPC Link hacia el ALB interno, ruta catch-all (`$default`), CORS abierto |
+| `rds.tf` | Subnet group + instancia RDS PostgreSQL 16.3 (`bancadb`), no accesible públicamente |
+| `logs.tf` | 4 log groups CloudWatch (`/ecs/banca-g8/{nats,accounts,transactions,alerts}`, retención 7 días) |
+| `ecs.tf` | Cluster `banca-g8-cluster`, 4 task definitions Fargate (nats + 3 microservicios), 4 services |
+| `outputs.tf` | URL pública del API Gateway, DNS del ALB (referencia interna), URLs de ECR, comando de login a ECR, nombre del cluster, endpoint RDS (sensitive), namespace de Cloud Map |
 
 ## Prerrequisitos
 
 - **Terraform ≥ 1.6**
-- **AWS CLI** configurada (`aws configure`) con permisos suficientes
-- **Docker** local para construir y empujar imágenes
-- Cuenta AWS con límites Fargate disponibles en la región elegida
+- **AWS CLI** configurada con permisos suficientes (ECS, ECR, RDS, API Gateway, IAM, VPC, Cloud Map, CloudWatch)
+- **Docker** local para construir y empujar imágenes (con soporte `--platform linux/amd64` si trabajás en Apple Silicon / Windows ARM)
+- Cuenta AWS con límites de Fargate y RDS disponibles en la región elegida
 
-> Si querés evitar el flujo manual, desde la raíz del repo podés correr `./deploy.sh` (o `make deploy`), que orquesta los pasos 1 a 3 automáticamente.
+## ⚠️ Antes de empezar: credenciales
+
+Este proyecto **no** debe versionar credenciales. `terraform.tfvars` está en `.gitignore` (ver más abajo) y nunca debe subirse a GitHub. Copiá el ejemplo y completá tus propios valores:
+
+```bash
+cp terraform.tfvars.example terraform.tfvars
+```
+
+```hcl
+# terraform.tfvars (NO subir a git)
+aws_region = "us-east-1"
+
+access_key = "TU_ACCESS_KEY"
+secret_key = "TU_SECRET_KEY"
+
+project_name = "banca-g8"
+image_tag    = "latest"
+
+db_username = "bancaadmin"
+db_password = "una-password-segura"
+```
+
+> Recomendado: en vez de `access_key`/`secret_key` en el archivo, usar variables de entorno (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) o el perfil de `aws configure`, y quitar esas dos variables del provider.
 
 ## Flujo de despliegue (paso a paso)
 
 ### 1. Crear la infraestructura
 
 ```bash
-cd terraform/option-b-ecs
 terraform init
 terraform plan
 terraform apply
 ```
 
-Al terminar verás los **7 outputs** definidos en `outputs.tf`:
+Al terminar verás los outputs definidos en `outputs.tf`, entre ellos:
 
 ```
-alb_dns_name                       = "test-nest-alb-123456.us-east-1.elb.amazonaws.com"
-cluster_name                       = "test-nest-cluster"
-ecr_orders_repository_url          = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test-nest/orders"
-ecr_notifications_repository_url   = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test-nest/notifications"
-ecr_login_command                  = "aws ecr get-login-password --region us-east-1 | docker login ..."
-service_discovery_namespace        = "app.internal"
-redis_endpoint                     = "test-nest-redis.abc123.0001.use1.cache.amazonaws.com:6379"
+api_gateway_url   = "https://abc123xyz.execute-api.us-east-1.amazonaws.com"
+alb_dns_name      = "banca-g8-alb-123456.us-east-1.elb.amazonaws.com"   # interno, solo referencia
+ecr_accounts_url  = "925181413822.dkr.ecr.us-east-1.amazonaws.com/banca-g8/accounts"
+ecr_transactions_url = "925181413822.dkr.ecr.us-east-1.amazonaws.com/banca-g8/transactions"
+ecr_alerts_url    = "925181413822.dkr.ecr.us-east-1.amazonaws.com/banca-g8/alerts"
+ecr_login_command = "aws ecr get-login-password --region us-east-1 | docker login ..."
+cluster_name      = "banca-g8-cluster"
+service_discovery_namespace = "app.internal"
 ```
 
-> En este punto los servicios `orders` y `notifications` arrancan pero **fallan**, porque todavía no hay imágenes en ECR. Es esperable.
+> En este punto los servicios `accounts`, `transactions` y `alerts` arrancan pero **fallan** porque todavía no hay imágenes en ECR. Es esperable.
 >
-> ElastiCache puede tardar **5-10 minutos** en estar disponible. Terraform espera; tené paciencia con el primer apply.
+> RDS puede tardar **5-10 minutos** en estar disponible. Terraform espera; tené paciencia con el primer apply.
 
 ### 2. Construir y subir las imágenes
 
-Desde la raíz del repo. **`--platform linux/amd64` es obligatorio** si construís desde un Mac M1/M2 o un Windows ARM: Fargate corre x86_64.
+Ejecutar desde la **raíz del monorepo NestJS** (no desde `terraform/`), porque el build necesita `libs/contracts` en el contexto:
 
 ```bash
-# Login a ECR (copiá el comando del output `ecr_login_command`)
+# Login a ECR (copiá el comando del output ecr_login_command)
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
 
-# Build + tag + push de orders
-docker build --platform linux/amd64 -f apps/orders/Dockerfile \
-  -t <ecr_orders_repository_url>:latest .
-docker push <ecr_orders_repository_url>:latest
+# accounts
+docker build --platform linux/amd64 -f apps/accounts/Dockerfile \
+  -t <ecr_accounts_url>:latest .
+docker push <ecr_accounts_url>:latest
 
-# Build + tag + push de notifications
-docker build --platform linux/amd64 -f apps/notifications/Dockerfile \
-  -t <ecr_notifications_repository_url>:latest .
-docker push <ecr_notifications_repository_url>:latest
+# transactions
+docker build --platform linux/amd64 -f apps/transactions/Dockerfile \
+  -t <ecr_transactions_url>:latest .
+docker push <ecr_transactions_url>:latest
+
+# alerts
+docker build --platform linux/amd64 -f apps/alerts/Dockerfile \
+  -t <ecr_alerts_url>:latest .
+docker push <ecr_alerts_url>:latest
 ```
+
+> En Windows, usar **Git Bash** para estos comandos: el pipe con `aws ecr get-login-password | docker login` no funciona igual en PowerShell.
 
 ### 3. Forzar redeploy de los servicios ECS
 
 ```bash
-aws ecs update-service --cluster test-nest-cluster --service orders        --force-new-deployment
-aws ecs update-service --cluster test-nest-cluster --service notifications --force-new-deployment
+aws ecs update-service --cluster banca-g8-cluster --service accounts     --force-new-deployment
+aws ecs update-service --cluster banca-g8-cluster --service transactions --force-new-deployment
+aws ecs update-service --cluster banca-g8-cluster --service alerts       --force-new-deployment
 ```
 
 ### 4. Probar end-to-end
 
 ```bash
-# Crear una orden: orders la guarda en Redis y publica order.created en NATS
-curl -X POST http://<alb_dns_name>/orders \
+# Crear una cuenta
+curl -X POST https://<api_gateway_url>/accounts \
   -H "Content-Type: application/json" \
-  -d '{"customer":"ana","total":120}'
-# → respuesta incluye orderId
+  -d '{"titular":"ana","saldo":500}'
 
-# Leer la orden desde Redis
-curl http://<alb_dns_name>/orders/<orderId>
-
-# Consultar estado de notificaciones (request/response a notifications)
-curl http://<alb_dns_name>/orders/status/ana
+# Iniciar una transferencia: accounts publica transfer.requested en NATS
+curl -X POST https://<api_gateway_url>/accounts/transfer \
+  -H "Content-Type: application/json" \
+  -d '{"origen":"<id-cuenta-origen>","destino":"<id-cuenta-destino>","monto":100}'
 ```
+
+En Windows/PowerShell usar `Invoke-RestMethod` en vez de `curl`.
 
 ### 5. Ver logs
 
 ```bash
-aws logs tail /ecs/test-nest/orders        --follow
-aws logs tail /ecs/test-nest/notifications --follow
-aws logs tail /ecs/test-nest/nats          --follow
+aws logs tail /ecs/banca-g8/accounts     --follow
+aws logs tail /ecs/banca-g8/transactions --follow
+aws logs tail /ecs/banca-g8/alerts       --follow
+aws logs tail /ecs/banca-g8/nats         --follow
 ```
+
+## Desarrollo local (antes de desplegar a AWS)
+
+```bash
+docker-compose up
+```
+
+Levanta NATS + PostgreSQL localmente para probar los 3 microservicios sin necesidad de AWS.
 
 ## Limpieza
 
@@ -158,31 +208,32 @@ aws logs tail /ecs/test-nest/nats          --follow
 terraform destroy
 ```
 
-> ⚠️ ECR no elimina repos con imágenes. Si `destroy` falla en los repositorios, agregale `force_delete = true` en `ecr.tf` o vaciá las imágenes antes.
+> ⚠️ ECR no elimina repos con imágenes — los repos ya tienen `force_delete = true`, así que no debería trabarse. Si falla igual, vaciá las imágenes manualmente antes.
 >
-> ElastiCache también tarda algunos minutos en destruirse.
+> RDS también tarda algunos minutos en destruirse. `skip_final_snapshot = true` evita que pida un snapshot final.
 
-## Estimación de costo (us-east-1, ~24/7)
+## Conceptos clave del diseño
 
-| Recurso              | Cantidad | Costo aprox. mensual |
-|----------------------|----------|----------------------|
-| Fargate (0.25 vCPU + 0.5 GB) | 3 tareas (nats + orders + notifications) | ~$22 |
-| ALB                  | 1        | ~$17 |
-| ElastiCache (cache.t3.micro) | 1 nodo | ~$12 |
-| Almacenamiento ECR   | <1 GB    | ~$0.10 |
-| CloudWatch Logs      | bajo volumen (retención 7 días) | ~$0.50 |
-| **Total**            |          | **~$52/mes** |
+1. **API Gateway + VPC Link delante del ALB interno**: el ALB ya no es público (`internal = true`); solo el API Gateway lo es. Esto responde al feedback de que `accounts` no debía recibir tráfico HTTP directamente sin una capa de gateway pública.
+2. **`awsvpc` network mode**: cada tarea Fargate tiene su propia ENI con IP; por eso el target group del ALB es `type = "ip"`.
+3. **Cloud Map vs ALB**: el tráfico este-oeste entre microservicios (accounts → NATS → transactions → NATS → alerts) usa DNS interno (`*.app.internal`); el ALB es solo para tráfico norte-sur (API Gateway → accounts).
+4. **RDS en vez de Redis**: se reemplazó ElastiCache por RDS PostgreSQL porque el dominio bancario necesita integridad transaccional y consistencia de saldo, no solo un caché clave-valor.
+5. **Encadenamiento de Security Groups**: las reglas referencian otros SGs (`referenced_security_group_id`) en vez de CIDRs — mínimo privilegio real: `transactions` y `alerts` no aceptan ningún ingreso directo (son workers puros de NATS), y RDS solo acepta desde `accounts` y `transactions`.
+6. **Sin NAT Gateway**: las tareas están en subnets públicas para evitar el costo de un NAT Gateway; RDS no tiene IP pública (`publicly_accessible = false`) aunque esté en una subnet pública, así que solo es alcanzable desde dentro de la VPC.
+7. **Secretos**: `access_key`, `secret_key`, `db_username` y `db_password` están marcados `sensitive = true` en `variables.tf`. Aun así, **el state de Terraform los guarda en texto plano** — por eso `terraform.tfstate*` nunca debe subirse a git (ver `.gitignore`).
 
-Para una clase: levantar antes de la demo y `terraform destroy` al terminar = unos centavos.
+## Seguridad: qué NO subir a GitHub
 
-## Conceptos clave a discutir en clase
+Este repo incluye (o debería incluir) un `.gitignore` con al menos:
 
-1. **`awsvpc` network mode**: cada tarea Fargate recibe su propia ENI con IP. Por eso los target groups del ALB son `type = "ip"`, no `instance`.
-2. **Cloud Map vs ALB interno**: para tráfico este-oeste entre microservicios usamos DNS (más barato). El ALB es solo para tráfico norte-sur (internet → orders).
-3. **Servicios administrados vs auto-gestionados**: NATS lo corremos en Fargate (nos lo administramos nosotros). Redis lo usamos vía ElastiCache (lo administra AWS: parches, backups, monitoring). Mostrar el trade-off costo/responsabilidad.
-4. **Encadenamiento de SGs**: en vez de listas de CIDRs, las reglas referencian otros SGs (`referenced_security_group_id`). Si las IPs cambian, la regla se sigue cumpliendo.
-5. **Roles separados**: `task_execution_role` (lo usa la plataforma ECS) vs `task_role` (lo usa la app dentro del container). Acá solo necesitamos el primero.
-6. **Trade-off costo/seguridad**: pusimos tareas en subnets públicas para evitar el costo de NAT Gateway. ElastiCache no recibe IP pública aunque la subnet sea pública, así que queda solo accesible desde dentro de la VPC.
-7. **State remoto**: el `backend "s3"` está comentado en `providers.tf`. Discutir por qué es crítico en equipos (locking, no perder el state, no commitear secretos).
-8. **Health check pragmático**: la ruta `/orders/status/healthcheck` no existe explícitamente en `orders.controller.ts`, pero cae dentro de `@Get('status/:customer')`, que responde 200. El matcher `200-404` también tolera la versión "no existe". Comparar con un endpoint dedicado `/healthz` que devuelva el estado de las dependencias (Redis, NATS).
-9. **Imagen para Fargate**: Fargate corre x86_64, por eso los `docker build` usan `--platform linux/amd64`. Sin esa flag, en Apple Silicon la imagen sale ARM y la tarea falla con `exec format error`.
+```gitignore
+terraform.tfvars
+*.tfvars
+!terraform.tfvars.example
+
+*.tfstate
+*.tfstate.*
+.terraform/
+```
+
+`terraform.tfvars` contiene las credenciales de AWS y la password de RDS en texto plano. El `terraform.tfstate` guarda esos mismos secretos como atributos de recursos (por ejemplo, `password` de `aws_db_instance`), aunque las variables estén marcadas `sensitive`. Si alguno de estos archivos ya se subió a git, hay que reescribir el historial (no alcanza con un commit nuevo) y **rotar inmediatamente** las credenciales expuestas en IAM y la password de RDS.

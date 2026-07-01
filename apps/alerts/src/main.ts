@@ -9,6 +9,8 @@ async function bootstrap() {
     transport: Transport.NATS,
     options: {
       servers: [process.env.NATS_URL ?? DEFAULT_NATS_URL],
+      maxReconnectAttempts: -1,
+      reconnectTimeWait: 3000,
     },
   });
 

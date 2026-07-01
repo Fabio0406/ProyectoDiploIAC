@@ -20,6 +20,11 @@ import { NATS_SERVICE } from '@app/contracts/nats.constants';
         url: config.get<string>('DATABASE_URL'),
         entities: [Account],
         synchronize: true,
+        ssl: config.get('NODE_ENV') === 'production'
+          ? { rejectUnauthorized: false }
+          : false,
+        retryAttempts: 10,
+        retryDelay: 3000,
       }),
     }),
 

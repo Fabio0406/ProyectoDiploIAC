@@ -15,6 +15,7 @@
       "entryFile": "main",
       "sourceRoot": "apps/accounts/src",
       "compilerOptions": {
+        "webpack": true,
         "tsConfigPath": "apps/accounts/tsconfig.app.json"
       }
     },
@@ -24,6 +25,7 @@
       "entryFile": "main",
       "sourceRoot": "apps/alerts/src",
       "compilerOptions": {
+        "webpack": true,
         "tsConfigPath": "apps/alerts/tsconfig.app.json"
       }
     },
@@ -42,6 +44,7 @@
       "entryFile": "main",
       "sourceRoot": "apps/transactions/src",
       "compilerOptions": {
+        "webpack": true,
         "tsConfigPath": "apps/transactions/tsconfig.app.json"
       }
     }

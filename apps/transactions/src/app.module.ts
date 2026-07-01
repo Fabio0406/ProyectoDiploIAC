@@ -21,6 +21,8 @@ import { TransactionsModule } from './transactions.module';
         ssl: config.get('NODE_ENV') === 'production'
           ? { rejectUnauthorized: false }
           : false,
+        retryAttempts: 10,
+        retryDelay: 3000,
       }),
     }),
 

@@ -1,9 +1,10 @@
-aws_region   = "us-east-1"
-access_key   = "AKIAIOSFODNN7EXAMPLE"
-secret_key   = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+aws_region = "us-east-1"
+
+access_key = "keyaqui"
+secret_key = "keyaqui"
 
 project_name = "banca-g8"
 image_tag    = "latest"
 
 db_username = "bancaadmin"
-db_password = "CambiarEsto1234!"
+db_password = "Proy1234!"

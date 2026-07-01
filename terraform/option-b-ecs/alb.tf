@@ -1,6 +1,6 @@
 resource "aws_lb" "main" {
   name               = "${var.project_name}-alb"
-  internal           = true                        
+  internal           = true
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = aws_subnet.public[*].id

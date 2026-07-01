@@ -22,7 +22,7 @@ resource "aws_security_group" "alb" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description     = "HTTP desde VPC Link del API Gateway"
+    description     = "HTTP solo desde las ENIs del VPC Link"
     from_port       = 80
     to_port         = 80
     protocol        = "tcp"

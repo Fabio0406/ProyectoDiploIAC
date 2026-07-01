@@ -1,49 +1,31 @@
 #!/usr/bin/env bash
 #
-# destroy.sh — Destrucción end-to-end de la infraestructura de Banca Simplificada (Grupo 8).
+# deploy.sh — Deploy end-to-end de Banca Simplificada (Grupo 8).
 #
 # Flujo:
 #   1. Pre-flight checks (CLIs, credenciales)
-#   2. Confirmación explícita (operación destructiva)
-#   3. Vacía repositorios ECR (terraform destroy falla si tienen imágenes)
-#   4. terraform destroy -auto-approve
-#   5. (Opcional) limpia imágenes Docker locales del proyecto
+#   2. terraform init + apply  → crea infraestructura en AWS
+#   3. Build de imágenes Docker (accounts, transactions, alerts)
+#   4. Push a ECR
+#   5. Force redeploy en ECS
 #
 # Uso:
-#   chmod +x destroy.sh
-#   ./destroy.sh                # pide confirmación
-#   ./destroy.sh --yes          # sin confirmación (CI / scripts)
-#   ./destroy.sh --keep-local   # no borra imágenes Docker locales
+#   chmod +x deploy.sh
+#   ./deploy.sh
 
 set -euo pipefail
 
-ASSUME_YES=0
-KEEP_LOCAL=0
-for arg in "$@"; do
-  case "$arg" in
-    --yes|-y)     ASSUME_YES=1 ;;
-    --keep-local) KEEP_LOCAL=1 ;;
-    -h|--help)
-      sed -n '2,20p' "$0"
-      exit 0
-      ;;
-    *) echo "Argumento desconocido: $arg" >&2; exit 2 ;;
-  esac
-done
-
+# ── Colores ──────────────────────────────────────────────────────────────────
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ $(tput colors 2>/dev/null || echo 0) -ge 8 ]]; then
-  C_GREEN="$(tput setaf 2)"
-  C_YELLOW="$(tput setaf 3)"
-  C_RED="$(tput setaf 1)"
-  C_BLUE="$(tput setaf 4)"
-  C_RESET="$(tput sgr0)"
+  C_GREEN="$(tput setaf 2)"; C_YELLOW="$(tput setaf 3)"
+  C_RED="$(tput setaf 1)";   C_BLUE="$(tput setaf 4)"; C_RESET="$(tput sgr0)"
 else
   C_GREEN=""; C_YELLOW=""; C_RED=""; C_BLUE=""; C_RESET=""
 fi
 
 step() { printf "\n${C_BLUE}[%s]${C_RESET} %s\n" "$1" "$2"; }
-ok()   { printf "${C_GREEN}OK${C_RESET} %s\n" "$1"; }
-warn() { printf "${C_YELLOW}!!${C_RESET} %s\n" "$1"; }
+ok()   { printf "${C_GREEN}  OK${C_RESET} %s\n" "$1"; }
+warn() { printf "${C_YELLOW}  !!${C_RESET} %s\n" "$1"; }
 die()  { printf "${C_RED}ERROR: %s${C_RESET}\n" "$1" >&2; exit 1; }
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,106 +34,105 @@ TF_DIR="$PROJECT_ROOT/terraform/option-b-ecs"
 # =========================================================
 # Paso 1 — Pre-flight checks
 # =========================================================
-step "1/4" "Pre-flight checks"
+step "1/5" "Pre-flight checks"
 
-for bin in terraform aws; do
+for bin in terraform aws docker; do
   command -v "$bin" >/dev/null 2>&1 || die "Falta '$bin' en el PATH."
 done
-ok "CLIs disponibles: terraform, aws"
+ok "CLIs disponibles: terraform, aws, docker"
+
+docker info >/dev/null 2>&1 || die "Docker no está corriendo. Inicialo antes de continuar."
+ok "Docker corriendo"
 
 [[ -d "$TF_DIR" ]] || die "No encuentro el directorio Terraform: $TF_DIR"
-[[ -f "$TF_DIR/terraform.tfstate" ]] || warn "No hay terraform.tfstate local. Si el state vive remoto está bien; si no, no hay nada que destruir."
+[[ -f "$TF_DIR/terraform.tfvars" ]] || die "Falta terraform.tfvars en $TF_DIR. Copiá terraform.tfvars.example y completalo con tus credenciales."
 
-aws sts get-caller-identity >/dev/null 2>&1 || die "Credenciales AWS inválidas. Configurar con 'aws configure' o exportar AWS_ACCESS_KEY_ID/SECRET."
+aws sts get-caller-identity >/dev/null 2>&1 || die "Credenciales AWS inválidas. Ejecutá 'aws configure'."
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 ok "Cuenta AWS autenticada: $ACCOUNT_ID"
 
-AWS_REGION="$(aws configure get region || echo us-east-1)"
+AWS_REGION="$(aws configure get region 2>/dev/null || echo us-east-1)"
 ok "Región: $AWS_REGION"
 
-# =========================================================
-# Paso 2 — Confirmación
-# =========================================================
-if [[ $ASSUME_YES -eq 0 ]]; then
-  echo
-  printf "${C_YELLOW}Esta operación borra TODA la infraestructura en AWS (VPC, ECS, ALB, RDS, ECR e imágenes).${C_RESET}\n"
-  printf "Cuenta: ${C_YELLOW}%s${C_RESET}   Región: ${C_YELLOW}%s${C_RESET}\n" "$ACCOUNT_ID" "$AWS_REGION"
-  read -r -p "Escribí 'destroy' para confirmar: " REPLY
-  [[ "$REPLY" == "destroy" ]] || die "Cancelado."
-fi
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
 # =========================================================
-# Paso 3 — Vaciar repositorios ECR
+# Paso 2 — Terraform
 # =========================================================
-step "2/4" "Vaciando repositorios ECR"
-
-empty_ecr_repo() {
-  local repo="$1"
-  if ! aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1; then
-    warn "Repo '$repo' no existe (ya destruido o nunca creado), salteo."
-    return 0
-  fi
-
-  local image_ids
-  image_ids="$(aws ecr list-images --repository-name "$repo" --region "$AWS_REGION" --query 'imageIds[*]' --output json)"
-
-  if [[ "$image_ids" == "[]" || -z "$image_ids" ]]; then
-    ok "Repo '$repo' ya está vacío"
-    return 0
-  fi
-
-  aws ecr batch-delete-image \
-    --repository-name "$repo" \
-    --region "$AWS_REGION" \
-    --image-ids "$image_ids" >/dev/null
-  ok "Repo '$repo' vaciado"
-}
-
-empty_ecr_repo "banca-g8/accounts"
-empty_ecr_repo "banca-g8/transactions"
-empty_ecr_repo "banca-g8/alerts"
-
-# =========================================================
-# Paso 4 — terraform destroy
-# =========================================================
-step "3/4" "terraform destroy"
+step "2/5" "Terraform init + apply"
 
 pushd "$TF_DIR" >/dev/null
-terraform init -input=false >/dev/null
-terraform destroy -auto-approve -input=false
+terraform init -input=false
+terraform apply -auto-approve -input=false
+ok "Infraestructura creada"
+
+CLUSTER_NAME="$(terraform output -raw cluster_name)"
+API_URL="$(terraform output -raw api_gateway_url)"
 popd >/dev/null
-ok "Recursos AWS destruidos"
 
 # =========================================================
-# Paso 5 — Limpieza local
+# Paso 3 — Build de imágenes Docker
 # =========================================================
-step "4/4" "Limpieza local"
+step "3/5" "Build de imágenes Docker"
 
-if [[ $KEEP_LOCAL -eq 1 ]]; then
-  warn "Se omite la limpieza de imágenes Docker locales (--keep-local)"
-else
-  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    LOCAL_IMAGES="$(docker images --format '{{.Repository}}:{{.Tag}}' \
-      | grep -E "(^${ECR_REGISTRY}/banca-g8/(accounts|transactions|alerts))" || true)"
-    if [[ -n "$LOCAL_IMAGES" ]]; then
-      echo "$LOCAL_IMAGES" | xargs -r docker rmi -f >/dev/null 2>&1 || true
-      ok "Imágenes Docker locales borradas"
-    else
-      ok "No hay imágenes Docker locales del proyecto"
-    fi
-  else
-    warn "Docker no está corriendo, no se limpian imágenes locales"
-  fi
-fi
+cd "$PROJECT_ROOT"
 
+for svc in accounts transactions alerts; do
+  echo "  Building $svc..."
+  docker build -t "banca-g8/${svc}:latest" -f "apps/${svc}/Dockerfile" . \
+    || die "Falló el build de $svc"
+  ok "Build $svc completado"
+done
+
+# =========================================================
+# Paso 4 — Push a ECR
+# =========================================================
+step "4/5" "Push a ECR"
+
+aws ecr get-login-password --region "$AWS_REGION" \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+ok "Login a ECR exitoso"
+
+for svc in accounts transactions alerts; do
+  REMOTE_TAG="${ECR_REGISTRY}/banca-g8/${svc}:latest"
+  docker tag "banca-g8/${svc}:latest" "$REMOTE_TAG"
+  echo "  Pushing $svc..."
+  docker push "$REMOTE_TAG"
+  ok "Push $svc completado → $REMOTE_TAG"
+done
+
+# =========================================================
+# Paso 5 — Force redeploy en ECS
+# =========================================================
+step "5/5" "Force redeploy en ECS"
+
+for svc in accounts transactions alerts; do
+  aws ecs update-service \
+    --cluster "$CLUSTER_NAME" \
+    --service "$svc" \
+    --force-new-deployment \
+    --region "$AWS_REGION" \
+    --output text --query 'service.serviceName' | xargs -I{} echo "  Redeploy iniciado: {}"
+done
+
+ok "Todos los servicios actualizados"
+
+# ── Resumen ──────────────────────────────────────────────────────────────────
 cat <<EOF
 
 ${C_GREEN}========================================${C_RESET}
-${C_GREEN} Infraestructura destruida — Grupo 8${C_RESET}
+${C_GREEN} Deploy completado — Grupo 8${C_RESET}
 ${C_GREEN}========================================${C_RESET}
 
-Para volver a desplegar:
-  ./deploy.sh
+  API Gateway URL: ${C_YELLOW}${API_URL}${C_RESET}
+
+  Probar:
+    curl ${API_URL}/accounts
+    curl -X POST ${API_URL}/accounts/transfer ...
+
+  Ver logs en CloudWatch:
+    /banca-g8/accounts
+    /banca-g8/transactions
+    /banca-g8/alerts
 
 EOF

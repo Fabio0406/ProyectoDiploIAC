@@ -1,4 +1,4 @@
-# ── VPC Link (puente entre API Gateway y el ALB interno) ─────────────────────
+# ── VPC Link (conecta API Gateway a recursos privados de la VPC) ──────────────
 resource "aws_apigatewayv2_vpc_link" "main" {
   name               = "${var.project_name}-vpc-link"
   security_group_ids = [aws_security_group.api_gateway.id]
@@ -33,14 +33,14 @@ resource "aws_apigatewayv2_integration" "accounts" {
   connection_id      = aws_apigatewayv2_vpc_link.main.id
 }
 
-# ── Ruta catch-all: reenvía todo al ALB ──────────────────────────────────────
+# ── Ruta catch-all ────────────────────────────────────────────────────────────
 resource "aws_apigatewayv2_route" "default" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "$default"
   target    = "integrations/${aws_apigatewayv2_integration.accounts.id}"
 }
 
-# ── Stage (auto-deploy activa el gateway inmediatamente) ─────────────────────
+# ── Stage ─────────────────────────────────────────────────────────────────────
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.main.id
   name        = "$default"
