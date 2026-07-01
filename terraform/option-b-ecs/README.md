@@ -221,19 +221,3 @@ terraform destroy
 5. **Encadenamiento de Security Groups**: las reglas referencian otros SGs (`referenced_security_group_id`) en vez de CIDRs — mínimo privilegio real: `transactions` y `alerts` no aceptan ningún ingreso directo (son workers puros de NATS), y RDS solo acepta desde `accounts` y `transactions`.
 6. **Sin NAT Gateway**: las tareas están en subnets públicas para evitar el costo de un NAT Gateway; RDS no tiene IP pública (`publicly_accessible = false`) aunque esté en una subnet pública, así que solo es alcanzable desde dentro de la VPC.
 7. **Secretos**: `access_key`, `secret_key`, `db_username` y `db_password` están marcados `sensitive = true` en `variables.tf`. Aun así, **el state de Terraform los guarda en texto plano** — por eso `terraform.tfstate*` nunca debe subirse a git (ver `.gitignore`).
-
-## Seguridad: qué NO subir a GitHub
-
-Este repo incluye (o debería incluir) un `.gitignore` con al menos:
-
-```gitignore
-terraform.tfvars
-*.tfvars
-!terraform.tfvars.example
-
-*.tfstate
-*.tfstate.*
-.terraform/
-```
-
-`terraform.tfvars` contiene las credenciales de AWS y la password de RDS en texto plano. El `terraform.tfstate` guarda esos mismos secretos como atributos de recursos (por ejemplo, `password` de `aws_db_instance`), aunque las variables estén marcadas `sensitive`. Si alguno de estos archivos ya se subió a git, hay que reescribir el historial (no alcanza con un commit nuevo) y **rotar inmediatamente** las credenciales expuestas en IAM y la password de RDS.
