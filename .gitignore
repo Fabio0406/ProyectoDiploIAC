@@ -72,3 +72,4 @@ override.tf.json
 .terraformrc
 terraform.rc
 # Nota: .terraform.lock.hcl SÍ se commitea (pinea versiones de providers).
+.claude
